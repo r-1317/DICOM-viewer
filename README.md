@@ -1,24 +1,27 @@
-# DICOM Viewer (CT/MRI)
+# DICOM Viewer
 
-PyQt5 + pydicom + numpy による簡易DICOMシリーズビューアです。
+PyQt5 + pydicom + numpy による簡易DICOMシリーズビューア
+
+![使用した際の画像](./画像1.png)
 
 ## 機能
 - DICOMシリーズ（ディレクトリ）または単一ファイル（マルチフレーム対応）を読み込み
 - スライダーでスライス位置を変更
 - Window Center/Width をスライダーで調整
 - 断面（Axial / Coronal / Sagittal）切り替え
-- 断面切替時も、DICOMヘッダから取得したピクセル間隔に基づく物理アスペクト比を保持
 
-## 依存パッケージのインストール（Windows PowerShell）
-```powershell
-# 任意: 仮想環境がある場合は有効化
-# .venv\Scripts\Activate.ps1
+## 使用方法(Windowsの場合)
+- `viewer.exe`を起動
 
+## 使用方法(Linux等の場合)
+
+### 依存パッケージのインストール
+```
 pip install -r requirements.txt
 ```
 
-## 起動方法
-```powershell
+### 起動方法
+```
 python view.py
 ```
 
