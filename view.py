@@ -248,6 +248,9 @@ class ImageView(QtWidgets.QLabel):
 		super().__init__()
 		self.setAlignment(QtCore.Qt.AlignCenter)
 		self._pixmap: Optional[QtGui.QPixmap] = None
+		# 右下オーバーレイ用（プレビュー等）
+		self._overlay_widget: Optional[QtWidgets.QWidget] = None
+		self._overlay_margin = 8
 
 	def set_image(self, qimg: QtGui.QImage):
 		self._pixmap = QtGui.QPixmap.fromImage(qimg)
@@ -257,15 +260,38 @@ class ImageView(QtWidgets.QLabel):
 		self._pixmap = None
 		self.clear()
 
+	def set_overlay_widget(self, w: Optional[QtWidgets.QWidget]):
+		"""このビューの右下に重ねる子ウィジェットを設定。"""
+		if self._overlay_widget is not None:
+			self._overlay_widget.setParent(None)
+		self._overlay_widget = w
+		if w is not None:
+			w.setParent(self)
+			w.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+			w.show()
+			self._position_overlay()
+
 	def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
 		super().resizeEvent(event)
 		self._update_scaled_pixmap()
+		self._position_overlay()
 
 	def _update_scaled_pixmap(self):
 		if self._pixmap is None:
 			return
 		scaled = self._pixmap.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
 		self.setPixmap(scaled)
+
+	def _position_overlay(self):
+		if self._overlay_widget is None:
+			return
+		m = self._overlay_margin
+		over = self._overlay_widget
+		# 右下に配置
+		sz = over.size()
+		x = max(0, self.width() - sz.width() - m)
+		y = max(0, self.height() - sz.height() - m)
+		over.move(x, y)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -288,6 +314,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
 		self.image_view = ImageView()
 		hbox.addWidget(self.image_view, stretch=1)
+
+		# 右下Axialプレビュー（ウィンドウに重ねる）
+		self.axial_preview = QtWidgets.QLabel(self)
+		self.axial_preview.setFixedSize(220, 220)
+		self.axial_preview.setFrameShape(QtWidgets.QFrame.Box)
+		self.axial_preview.setLineWidth(1)
+		self.axial_preview.setStyleSheet('background-color: rgba(0,0,0,0);')
+		self.axial_preview.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+		self.axial_preview.setAlignment(QtCore.Qt.AlignCenter)
+		self.axial_preview.setToolTip('Axial preview (mid-slice)')
+		self.axial_preview.raise_()
+		self._position_axial_preview()
 
 		# コントロールパネル
 		panel = QtWidgets.QFrame()
@@ -351,6 +389,11 @@ class MainWindow(QtWidgets.QMainWindow):
 		self.slider_wc.valueChanged.connect(self._on_wc_changed)
 		self.slider_ww.valueChanged.connect(self._on_ww_changed)
 
+	def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+		"""ウィンドウのリサイズ時にプレビューを右下へ再配置。"""
+		super().resizeEvent(event)
+		self._position_axial_preview()
+
 	# --- UI handlers ---
 	def _on_open_dir(self):
 		path = QtWidgets.QFileDialog.getExistingDirectory(self, 'DICOMフォルダを選択')
@@ -409,6 +452,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 		self._reset_slice_slider()
 		self._update_image()
+		self._update_axial_preview()
 		self._update_status()
 
 	def _reset_slice_slider(self):
@@ -456,6 +500,8 @@ class MainWindow(QtWidgets.QMainWindow):
 		sl = self._get_current_slice2d()
 		if sl is None:
 			self.image_view.clear_image()
+			# プレビューもクリア
+			self.axial_preview.clear()
 			return
 		wc = self.window_center if self.window_center is not None else float(np.mean(sl))
 		ww = self.window_width if self.window_width is not None else float(np.ptp(sl))
@@ -489,6 +535,76 @@ class MainWindow(QtWidgets.QMainWindow):
 			max_idx = self.slider_slice.maximum()
 			self.lbl_slice.setText(f'{self.slice_index + 1} / {max_idx + 1}')
 		self._update_status()
+		# プレビュー更新
+		self._update_axial_preview()
+
+	def _update_axial_preview(self):
+		"""右下のAxialプレビューを更新。Sagittal/Coronal時は位置ラインを重畳。"""
+		if self.volume is None or self.axial_preview is None:
+			return
+		vol = self.volume.volume
+		z = vol.shape[0]
+		if z <= 0:
+			self.axial_preview.clear()
+			return
+		mid_idx = max(0, min(z - 1, z // 2))
+		sl = vol[mid_idx, :, :]
+		# WC/WW（未設定時はスライスから推定）
+		wc = self.window_center if self.window_center is not None else float(np.mean(sl))
+		ww = self.window_width if self.window_width is not None else float(np.ptp(sl))
+		invert = (str(self.volume.photometric).upper() == 'MONOCHROME1')
+		img8 = windowing(sl, wc, ww, invert=invert)
+		qimg = to_qimage_gray(img8)
+
+		# Axial平面の物理比で縦横比補正
+		rows, cols = img8.shape
+		_, sy, sx = self.volume.spacing
+		target_w = int(cols)
+		target_h = max(1, int(round(rows * (sy / sx if sx > 0 else 1.0))))
+		qimg_phys = qimg.scaled(target_w, target_h, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)
+
+		# プレビューサイズにレターボックスでフィット
+		pw = self.axial_preview.width()
+		ph = self.axial_preview.height()
+		canvas = QtGui.QImage(pw, ph, QtGui.QImage.Format_ARGB32)
+		canvas.fill(QtGui.QColor(0, 0, 0, 0))
+		painter = QtGui.QPainter(canvas)
+		try:
+			# 背面を半透明黒に
+			painter.fillRect(0, 0, pw, ph, QtGui.QColor(0, 0, 0, 120))
+			# スケーリング計算
+			src_w = qimg_phys.width()
+			src_h = qimg_phys.height()
+			scale = min(pw / src_w, ph / src_h) if src_w > 0 and src_h > 0 else 1.0
+			dw = int(round(src_w * scale))
+			dh = int(round(src_h * scale))
+			offx = (pw - dw) // 2
+			offy = (ph - dh) // 2
+			# 画像描画
+			target_rect = QtCore.QRect(offx, offy, dw, dh)
+			painter.drawImage(target_rect, qimg_phys)
+
+			# 現在の断面に応じてラインを描画
+			pen_sag = QtGui.QPen(QtGui.QColor(255, 80, 80), 2)
+			pen_cor = QtGui.QPen(QtGui.QColor(80, 255, 80), 2)
+			if self.orientation == 'Sagittal':
+				# x方向位置
+				x_dim = vol.shape[2]
+				fx = 0.0 if x_dim <= 1 else float(self.slice_index) / float(x_dim - 1)
+				px = offx + int(round(fx * dw))
+				painter.setPen(pen_sag)
+				painter.drawLine(px, offy, px, offy + dh)
+			elif self.orientation == 'Coronal':
+				# y方向位置
+				y_dim = vol.shape[1]
+				fy = 0.0 if y_dim <= 1 else float(self.slice_index) / float(y_dim - 1)
+				py = offy + int(round(fy * dh))
+				painter.setPen(pen_cor)
+				painter.drawLine(offx, py, offx + dw, py)
+		finally:
+			painter.end()
+
+		self.axial_preview.setPixmap(QtGui.QPixmap.fromImage(canvas))
 
 	def _get_plane_spacing(self) -> Tuple[float, float]:
 		"""現在の断面に対応する2D平面の(行方向dy, 列方向dx)の物理間隔(mm)を返す。
@@ -517,6 +633,19 @@ class MainWindow(QtWidgets.QMainWindow):
 		if self.window_center is not None and self.window_width is not None:
 			msg += f'| WC/WW: {self.window_center:.1f}/{self.window_width:.1f}'
 		self.status.showMessage(msg)
+
+	def _position_axial_preview(self):
+		"""QMainWindow の内容領域右下へプレビューを配置。"""
+		if getattr(self, 'axial_preview', None) is None:
+			return
+		m = 8
+		rect = self.contentsRect()
+		top_left = rect.topLeft()
+		w = self.axial_preview.width()
+		h = self.axial_preview.height()
+		x = top_left.x() + rect.width() - w - m
+		y = top_left.y() + rect.height() - h - m
+		self.axial_preview.move(max(0, x), max(0, y))
 
 
 def main():
